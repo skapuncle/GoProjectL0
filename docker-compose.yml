@@ -1,0 +1,19 @@
+version: '3'
+services:
+  nats:
+    image: nats-streaming:latest
+    ports:
+      - 4222:4222
+      - 8222:8222
+  db:
+    image: postgres:latest
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+      POSTGRES_DB: mydb
+    ports:
+      - 5432:5432
+  adminer:
+    image: adminer
+    ports:
+      - 8080:8080
