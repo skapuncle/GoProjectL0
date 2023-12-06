@@ -1,8 +1,11 @@
 package common
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/nats-io/stan.go"
 	"math/rand"
 	"strconv"
 	"sync"
@@ -244,4 +247,94 @@ func (c *Cache) clearItems(keys []string) {
 	for _, k := range keys {
 		delete(c.items, k)
 	}
+}
+
+// Connector - структура для подключения к БД
+type Connector struct {
+	Uname  string
+	Pass   string
+	Port   string
+	Host   string
+	DBname string
+}
+
+// All - структура со всем, что может понадобиться для работы
+type All struct {
+	Connctr    Connector
+	Ordr       Order
+	Pool       *pgxpool.Pool
+	Cch        *Cache
+	StreamConn stan.Conn
+	StreamSubs stan.Subscription
+}
+
+// GetPGSQL - метод для генерации строки
+func (c Connector) GetPGSQL() string {
+	return fmt.Sprintf("postgresql://%s:%s@%s:%s/%s", c.Uname, c.Pass, c.Host, c.Port, c.DBname)
+}
+
+// NewAll - метод для создания новой структуры с коннектором и временными интервалами кэша
+func NewAll(c Connector, defaultExpiration, cleanupInterval time.Duration) *All {
+	return &All{Connctr: c, Cch: NewCache(defaultExpiration, cleanupInterval)}
+}
+
+// FromDbToCacheByKey - метод для подгрузки данных из БД в кэш, если в заказе есть номер
+func (a *All) FromDbToCacheByKey() error {
+	if a.Ordr.OrderUID == "" {
+		return fmt.Errorf("Key is empty")
+	}
+	var DelId, PayId string
+	query := `Select TrackNumber, Entry, Deliveries, Pays, Items, Locale, InternalSignature, CustomerID, DeliveryService, Shardkey, SmID, DateCreated, OofShard from orders where orderUID = $1`
+	rows, err := a.Pool.Query(context.TODO(), query, a.Ordr.OrderUID)
+	if err != nil {
+		fmt.Errorf("Select from Order failed: %v", err)
+	}
+	it := make([]int, 0)
+	for rows.Next() {
+		err = rows.Scan(&a.Ordr.TrackNumber, &a.Ordr.Entry, &DelId, &PayId, &it, &a.Ordr.Locale, &a.Ordr.InternalSignature, &a.Ordr.CustomerID, &a.Ordr.DeliveryService, &a.Ordr.Shardkey, &a.Ordr.SmID, &a.Ordr.DateCreated, &a.Ordr.OofShard)
+		if err != nil {
+			return fmt.Errorf("Scanning rows from selected order failed: %v", err)
+		}
+	}
+
+	for i := 0; i < len(it); i++ {
+		query = `Select chrtid, TrackNumber, Price, Rid, Item_name, Sale, Size, TotalPrice, NmID, Brand, Status from item where chrtid = $1`
+		rows, err := a.Pool.Query(context.TODO(), query, it[i])
+		if err != nil {
+			return fmt.Errorf("Select from Items failed: %v", err)
+		}
+		for rows.Next() {
+			var utem Item
+			err = rows.Scan(&utem.ChrtID, &utem.TrackNumber, &utem.Price, &utem.Rid, &utem.Name, &utem.Sale, &utem.Size, &utem.TotalPrice, &utem.NmID, &utem.Brand, &utem.Status)
+			if err != nil {
+				return fmt.Errorf("Scanning rows from selected items failed: %v", err)
+			}
+			a.Ordr.Items = append(a.Ordr.Items, utem)
+		}
+	}
+	query = `Select del_name, Phone, Zip, City, Address, Region, Email from delivery where del_id = $1`
+	rows, err = a.Pool.Query(context.TODO(), query, DelId)
+	if err != nil {
+		return fmt.Errorf("Select from Delivery failed: %v", err)
+	}
+	for rows.Next() {
+		err = rows.Scan(&a.Ordr.Deliveries.Name, &a.Ordr.Deliveries.Phone, &a.Ordr.Deliveries.Zip, &a.Ordr.Deliveries.City, &a.Ordr.Deliveries.Address, &a.Ordr.Deliveries.Region, &a.Ordr.Deliveries.Email)
+		if err != nil {
+			return fmt.Errorf("Scanning rows from selected delivery failed: %v", err)
+		}
+	}
+	query = `select Transaction, RequestID, Currency, Provider, Amount, PaymentDt, Bank, DeliveryCost, GoodsTotal, CustomFee from payment where pay_id = $1`
+	rows, err = a.Pool.Query(context.TODO(), query, PayId)
+	if err != nil {
+		return fmt.Errorf("Select from Payment failed: %v", err)
+	}
+	for rows.Next() {
+		err = rows.Scan(&a.Ordr.Pays.Transaction, &a.Ordr.Pays.RequestID, &a.Ordr.Pays.Currency, &a.Ordr.Pays.Provider, &a.Ordr.Pays.Amount, &a.Ordr.Pays.PaymentDt, &a.Ordr.Pays.Bank, &a.Ordr.Pays.DeliveryCost, &a.Ordr.Pays.GoodsTotal, &a.Ordr.Pays.CustomFee)
+		if err != nil {
+			return fmt.Errorf("Scanning rows from selected payments failed: %v", err)
+		}
+	}
+
+	a.Cch.Set(a.Ordr.OrderUID, a.Ordr, 5*time.Minute)
+	return nil
 }
