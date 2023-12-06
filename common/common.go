@@ -201,3 +201,47 @@ func (c *Cache) Delete(key string) error {
 	return nil
 
 }
+
+// Запуск сборщика мусора в горутине
+func (c *Cache) StartGC() {
+	go c.GC()
+}
+
+// Сборщик мусора
+func (c *Cache) GC() {
+	for {
+		// Ожидаем время установленное в cleanupInterval
+		<-time.After(c.cleanupInterval)
+		if c.items == nil {
+			return
+		}
+		// Ищем элементы с истекшим временем жизни и удаляем из хранилища
+		if keys := c.expiredKeys(); len(keys) != 0 {
+			c.clearItems(keys)
+		}
+	}
+}
+
+// Функция expiredKeys возвращает список "просроченных" ключей
+func (c *Cache) expiredKeys() (keys []string) {
+	c.RLock()
+
+	defer c.RUnlock()
+
+	for k, i := range c.items {
+		if time.Now().UnixNano() > i.Expiration && i.Expiration > 0 {
+			keys = append(keys, k)
+		}
+	}
+	return
+}
+
+// clearItems удаляет ключи из переданного списка
+func (c *Cache) clearItems(keys []string) {
+	c.Lock()
+	defer c.Unlock()
+
+	for _, k := range keys {
+		delete(c.items, k)
+	}
+}
