@@ -2,11 +2,14 @@ package common
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/nats-io/stan.go"
+	"html/template"
 	"math/rand"
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
@@ -337,4 +340,134 @@ func (a *All) FromDbToCacheByKey() error {
 
 	a.Cch.Set(a.Ordr.OrderUID, a.Ordr, 5*time.Minute)
 	return nil
+}
+
+// UploadCache - метод для добавления данных из БД в кэш при старте программы
+func (a *All) UploadCache() error {
+	query := `select orderuid from orders`
+	rows, err := a.Pool.Query(context.TODO(), query)
+	if err != nil {
+		fmt.Println(time.Now(), "Query error: ", err)
+		return err
+	}
+	for rows.Next() {
+		err = rows.Scan(&a.Ordr.OrderUID)
+		if err != nil {
+			fmt.Println(time.Now(), "rows scanning error:", err)
+			return err
+		}
+	}
+	err = a.FromDbToCacheByKey()
+	if err != nil {
+		fmt.Println(time.Now(), "caching data from db going wrong:", err)
+		return err
+	}
+	return nil
+}
+
+// MessageHandler - обработчик сообщений из канала nats-streaming
+func (a *All) MessageHandler(m *stan.Msg) {
+	err := json.Unmarshal(m.Data, &a.Ordr)
+	if err != nil {
+		fmt.Println(err, "Json")
+		return
+	}
+	a.Cch.Set(a.Ordr.OrderUID, a.Ordr, 5*time.Minute)
+	fmt.Println(time.Now(), a.Ordr.OrderUID, "putted in cache")
+
+	insertDelivery(a)
+	insertPayment(a)
+	insertOrder(a)
+	insertItems(a)
+}
+
+// insertDelivery: Вставляет данные о доставке в таблицу delivery
+func insertDelivery(a *All) {
+	query := "INSERT INTO delivery (del_name, Phone, Zip, City, Address, Region, Email)	Values ($1, $2, $3, $4, $5, $6, $7) returning del_id"
+	err := a.Pool.QueryRow(context.TODO(), query, a.Ordr.Deliveries.Name, a.Ordr.Deliveries.Phone, a.Ordr.Deliveries.Zip, a.Ordr.Deliveries.City, a.Ordr.Deliveries.Address, a.Ordr.Deliveries.Region, a.Ordr.Deliveries.Email)
+	if err != nil {
+		fmt.Println(time.Now(), "Insert to Delivery failed:", err)
+	}
+}
+
+// insertPayment: Вставляет данные о платеже в таблицу payment
+func insertPayment(a *All) {
+	query := "INSERT INTO payment (Transaction, RequestID, Currency, Provider, Amount, PaymentDt, Bank, DeliveryCost, GoodsTotal, CustomFee)	Values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning pay_id"
+	err := a.Pool.QueryRow(context.TODO(), query, a.Ordr.Pays.Transaction, a.Ordr.Pays.RequestID, a.Ordr.Pays.Currency, a.Ordr.Pays.Provider, a.Ordr.Pays.Amount, a.Ordr.Pays.PaymentDt, a.Ordr.Pays.Bank, a.Ordr.Pays.DeliveryCost, a.Ordr.Pays.GoodsTotal, a.Ordr.Pays.CustomFee)
+	if err != nil {
+		fmt.Println(time.Now(), "Insert to Payment failed:", err)
+	}
+}
+
+// insertOrder: Вставляет данные о заказе в таблицу orders
+func insertOrder(a *All) {
+	it := make([]int, len(a.Ordr.Items))
+	for i := 0; i < len(a.Ordr.Items); i++ {
+		it[i] = a.Ordr.Items[i].ChrtID
+	}
+	query := "INSERT INTO orders (OrderUID, TrackNumber, Entry, Deliveries, Pays, Items, Locale, InternalSignature, CustomerID, DeliveryService, Shardkey, SmID, DateCreated, OofShard)	Values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) returning OrderUID"
+	err := a.Pool.QueryRow(context.TODO(), query, a.Ordr.OrderUID, a.Ordr.TrackNumber, a.Ordr.Entry, a.Ordr.Deliveries.Name, a.Ordr.Pays.Transaction, it, a.Ordr.Locale, a.Ordr.InternalSignature, a.Ordr.CustomerID, a.Ordr.DeliveryService, a.Ordr.Shardkey, a.Ordr.SmID, a.Ordr.DateCreated, a.Ordr.OofShard)
+	if err != nil {
+		fmt.Println(time.Now(), "Insert to Order failed:", err)
+	}
+}
+
+// insertItems: Вставляет данные о каждом элементе заказа в таблицу item
+func insertItems(a *All) {
+	for j := 0; j < len(a.Ordr.Items); j++ {
+		query := "INSERT INTO item (ChrtID, TrackNumber, Price, Rid, Item_name, Sale, Size, TotalPrice, NmID, Brand, Status, orderid)	Values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) returning ChrtID"
+		err := a.Pool.QueryRow(context.TODO(), query, a.Ordr.Items[j].ChrtID, a.Ordr.Items[j].TrackNumber, a.Ordr.Items[j].Price, a.Ordr.Items[j].Rid, a.Ordr.Items[j].Name, a.Ordr.Items[j].Sale, a.Ordr.Items[j].Size, a.Ordr.Items[j].TotalPrice, a.Ordr.Items[j].NmID, a.Ordr.Items[j].Brand, a.Ordr.Items[j].Status, a.Ordr.OrderUID)
+		if err != nil {
+			fmt.Println(time.Now(), "Insert to Items failed:", err)
+		}
+	}
+}
+
+// OrderHandler - обработчик http-запросов
+func (a *All) OrderHandler(Writer http.ResponseWriter, Request *http.Request) {
+	var err error
+	switch Request.Method {
+	case "GET":
+		err = a.getHandler(Writer)
+	case "POST":
+		err = a.postHandler(Writer, Request)
+	default:
+		http.Error(Writer, "Invalid request method", 405)
+		return
+	}
+	if err != nil {
+		http.Error(Writer, err.Error(), 500)
+	}
+}
+
+// getHandler - обработчик GET-запроса
+func (a *All) getHandler(Writer http.ResponseWriter) error {
+	tmpl, err := template.ParseFiles("client/index.html")
+	if err != nil {
+		return err
+	}
+	return tmpl.Execute(Writer, nil)
+}
+
+// postHandler - обработчик POST-запроса
+func (a *All) postHandler(Writer http.ResponseWriter, Request *http.Request) error {
+	Ouid := Request.PostFormValue("order_uid")
+	Value, found := a.Cch.Get(Ouid)
+	if !found {
+		fmt.Fprintf(Writer, "Reading from DB:\n")
+		a.Ordr.OrderUID = Ouid
+		err := a.FromDbToCacheByKey()
+		if err != nil {
+			return err
+		}
+		Value, _ = a.Cch.Get(a.Ordr.OrderUID)
+	} else {
+		fmt.Fprintf(Writer, "Reading from Cache:\n")
+	}
+	JsonValue, err := json.MarshalIndent(Value, "", "\t")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(Writer, string(JsonValue))
+	return err
 }
