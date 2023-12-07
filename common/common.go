@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,6 +105,7 @@ func NewOrderGen() *Order {
 	var D = NewDeliveryGen()
 	var P = NewPaymentGen()
 	var I = NewItemGen(k)
+
 	return &Order{"orderUID" + strconv.Itoa(i), "trackNumber" + strconv.Itoa(i), "entry" + strconv.Itoa(i), *D, *P, I, "locale" + strconv.Itoa(i), "internalSignature" + strconv.Itoa(i), "customerID" + strconv.Itoa(i), "deliveryService" + strconv.Itoa(i), "shardkey" + strconv.Itoa(i), i, time.Now().Add(time.Duration(i) * time.Millisecond), "oofShard" + strconv.Itoa(i)}
 }
 
@@ -286,7 +288,7 @@ func (a *All) FromDbToCacheByKey() error {
 	if a.Ordr.OrderUID == "" {
 		return fmt.Errorf("Key is empty")
 	}
-	var DelId, PayId string
+	var DelId, PayId sql.NullString
 	query := `Select TrackNumber, Entry, Deliveries, Pays, Items, Locale, InternalSignature, CustomerID, DeliveryService, Shardkey, SmID, DateCreated, OofShard from orders where orderUID = $1`
 	rows, err := a.Pool.Query(context.TODO(), query, a.Ordr.OrderUID)
 	if err != nil {
