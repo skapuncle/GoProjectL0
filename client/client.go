@@ -36,6 +36,7 @@ func main() {
 		fmt.Println(time.Now(), "caching data going wrong:", err)
 		os.Exit(1)
 	}
+	fmt.Println(time.Now(), "caching data complete")
 
 	// Подключаемся к серверу сообщений
 	ServStruck.StreamConn, err = stan.Connect("test-cluster", "client-123", stan.NatsURL("0.0.0.0:4222"))
@@ -55,12 +56,12 @@ func main() {
 
 	// Запускаем HTTP-сервер, который слушает на порту 3000 и обрабатывает запросы с помощью метода OrderHandler экземпляра All
 	http.HandleFunc("/", ServStruck.OrderHandler)
+	fmt.Println(time.Now(), "Listening on port: 3000")
 	err = http.ListenAndServe(":3000", nil)
 	if err != nil {
 		fmt.Println(time.Now(), "\"http.ListenAndServe\" have some err to you", err)
 		os.Exit(1)
 	}
-	fmt.Println(time.Now(), "Listening on port: 3000")
 
 	// Ожидаем прерывание сигнала от операционной системы, чтобы корректно отписаться от канала и закрыть соединения с сервером сообщений и базой данных
 	signalChan := make(chan os.Signal, 1)

@@ -72,9 +72,9 @@ type Item struct {
 func NewItemGen(number int) []Item {
 	It := make([]Item, number)
 	number--
-	for number > 0 {
-		var i = rand.Int()
-		It[number] = Item{i, "trackNumber" + strconv.Itoa(i), i, "rid" + strconv.Itoa(i), "name" + strconv.Itoa(i), i, "size" + strconv.Itoa(i), i, i, "brand" + strconv.Itoa(i), i}
+	for number >= 0 {
+		var i = rand.Intn(1000) + 1 // Генерирует случайное число от 1 до 1000
+		It[number] = Item{i, "trackNumber" + strconv.Itoa(rand.Intn(1000)+1), i, "rid" + strconv.Itoa(rand.Intn(1000)+1), "name" + strconv.Itoa(rand.Intn(1000)+1), i, "size" + strconv.Itoa(rand.Intn(1000)+1), i, i, "brand" + strconv.Itoa(rand.Intn(1000)+1), i}
 		number--
 	}
 	return It
@@ -358,12 +358,13 @@ func (a *All) UploadCache() error {
 			fmt.Println(time.Now(), "rows scanning error:", err)
 			return err
 		}
+		err = a.FromDbToCacheByKey()
+		if err != nil {
+			fmt.Println(time.Now(), "caching data from db going wrong:", err)
+			return err
+		}
 	}
-	err = a.FromDbToCacheByKey()
-	if err != nil {
-		fmt.Println(time.Now(), "caching data from db going wrong:", err)
-		return err
-	}
+
 	return nil
 }
 
@@ -374,55 +375,48 @@ func (a *All) MessageHandler(m *stan.Msg) {
 		fmt.Println(err, "Json")
 		return
 	}
+	var ResultDelivery, ResultPayment, ResultOrder string
+	var ResultItems int
 	a.Cch.Set(a.Ordr.OrderUID, a.Ordr, 5*time.Minute)
 	fmt.Println(time.Now(), a.Ordr.OrderUID, "putted in cache")
 
-	insertDelivery(a)
-	insertPayment(a)
-	insertOrder(a)
-	insertItems(a)
-}
-
-// insertDelivery: Вставляет данные о доставке в таблицу delivery
-func insertDelivery(a *All) {
 	query := "INSERT INTO delivery (del_name, Phone, Zip, City, Address, Region, Email)	Values ($1, $2, $3, $4, $5, $6, $7) returning del_id"
-	err := a.Pool.QueryRow(context.TODO(), query, a.Ordr.Deliveries.Name, a.Ordr.Deliveries.Phone, a.Ordr.Deliveries.Zip, a.Ordr.Deliveries.City, a.Ordr.Deliveries.Address, a.Ordr.Deliveries.Region, a.Ordr.Deliveries.Email)
+	err = a.Pool.QueryRow(context.TODO(), query, a.Ordr.Deliveries.Name, a.Ordr.Deliveries.Phone, a.Ordr.Deliveries.Zip, a.Ordr.Deliveries.City, a.Ordr.Deliveries.Address, a.Ordr.Deliveries.Region, a.Ordr.Deliveries.Email).Scan(&ResultDelivery)
 	if err != nil {
 		fmt.Println(time.Now(), "Insert to Delivery failed:", err)
-	}
-}
 
-// insertPayment: Вставляет данные о платеже в таблицу payment
-func insertPayment(a *All) {
-	query := "INSERT INTO payment (Transaction, RequestID, Currency, Provider, Amount, PaymentDt, Bank, DeliveryCost, GoodsTotal, CustomFee)	Values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning pay_id"
-	err := a.Pool.QueryRow(context.TODO(), query, a.Ordr.Pays.Transaction, a.Ordr.Pays.RequestID, a.Ordr.Pays.Currency, a.Ordr.Pays.Provider, a.Ordr.Pays.Amount, a.Ordr.Pays.PaymentDt, a.Ordr.Pays.Bank, a.Ordr.Pays.DeliveryCost, a.Ordr.Pays.GoodsTotal, a.Ordr.Pays.CustomFee)
+	}
+	fmt.Println(time.Now(), "delivery =", ResultDelivery)
+
+	query = "INSERT INTO payment (Transaction, RequestID, Currency, Provider, Amount, PaymentDt, Bank, DeliveryCost, GoodsTotal, CustomFee)	Values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning pay_id"
+	err = a.Pool.QueryRow(context.TODO(), query, a.Ordr.Pays.Transaction, a.Ordr.Pays.RequestID, a.Ordr.Pays.Currency, a.Ordr.Pays.Provider, a.Ordr.Pays.Amount, a.Ordr.Pays.PaymentDt, a.Ordr.Pays.Bank, a.Ordr.Pays.DeliveryCost, a.Ordr.Pays.GoodsTotal, a.Ordr.Pays.CustomFee).Scan(&ResultPayment)
 	if err != nil {
 		fmt.Println(time.Now(), "Insert to Payment failed:", err)
 	}
-}
+	fmt.Println(time.Now(), "payment =", ResultPayment)
 
-// insertOrder: Вставляет данные о заказе в таблицу orders
-func insertOrder(a *All) {
 	it := make([]int, len(a.Ordr.Items))
+
 	for i := 0; i < len(a.Ordr.Items); i++ {
 		it[i] = a.Ordr.Items[i].ChrtID
 	}
-	query := "INSERT INTO orders (OrderUID, TrackNumber, Entry, Deliveries, Pays, Items, Locale, InternalSignature, CustomerID, DeliveryService, Shardkey, SmID, DateCreated, OofShard)	Values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) returning OrderUID"
-	err := a.Pool.QueryRow(context.TODO(), query, a.Ordr.OrderUID, a.Ordr.TrackNumber, a.Ordr.Entry, a.Ordr.Deliveries.Name, a.Ordr.Pays.Transaction, it, a.Ordr.Locale, a.Ordr.InternalSignature, a.Ordr.CustomerID, a.Ordr.DeliveryService, a.Ordr.Shardkey, a.Ordr.SmID, a.Ordr.DateCreated, a.Ordr.OofShard)
+
+	query = "INSERT INTO orders (OrderUID, TrackNumber, Entry, Deliveries, Pays, Items, Locale, InternalSignature, CustomerID, DeliveryService, Shardkey, SmID, DateCreated, OofShard)	Values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) returning OrderUID"
+	err = a.Pool.QueryRow(context.TODO(), query, a.Ordr.OrderUID, a.Ordr.TrackNumber, a.Ordr.Entry, ResultDelivery, ResultPayment, it, a.Ordr.Locale, a.Ordr.InternalSignature, a.Ordr.CustomerID, a.Ordr.DeliveryService, a.Ordr.Shardkey, a.Ordr.SmID, a.Ordr.DateCreated, a.Ordr.OofShard).Scan(&ResultOrder)
 	if err != nil {
 		fmt.Println(time.Now(), "Insert to Order failed:", err)
 	}
-}
+	fmt.Println(time.Now(), "Order =", ResultOrder)
 
-// insertItems: Вставляет данные о каждом элементе заказа в таблицу item
-func insertItems(a *All) {
-	for j := 0; j < len(a.Ordr.Items); j++ {
-		query := "INSERT INTO item (ChrtID, TrackNumber, Price, Rid, Item_name, Sale, Size, TotalPrice, NmID, Brand, Status, orderid)	Values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) returning ChrtID"
-		err := a.Pool.QueryRow(context.TODO(), query, a.Ordr.Items[j].ChrtID, a.Ordr.Items[j].TrackNumber, a.Ordr.Items[j].Price, a.Ordr.Items[j].Rid, a.Ordr.Items[j].Name, a.Ordr.Items[j].Sale, a.Ordr.Items[j].Size, a.Ordr.Items[j].TotalPrice, a.Ordr.Items[j].NmID, a.Ordr.Items[j].Brand, a.Ordr.Items[j].Status, a.Ordr.OrderUID)
+	for j := len(a.Ordr.Items) - 1; j > 0; j-- {
+		query = "INSERT INTO item (ChrtID, TrackNumber, Price, Rid, Item_name, Sale, Size, TotalPrice, NmID, Brand, Status, orderid)	Values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) returning ChrtID"
+		err = a.Pool.QueryRow(context.TODO(), query, a.Ordr.Items[j].ChrtID, a.Ordr.Items[j].TrackNumber, a.Ordr.Items[j].Price, a.Ordr.Items[j].Rid, a.Ordr.Items[j].Name, a.Ordr.Items[j].Sale, a.Ordr.Items[j].Size, a.Ordr.Items[j].TotalPrice, a.Ordr.Items[j].NmID, a.Ordr.Items[j].Brand, a.Ordr.Items[j].Status, a.Ordr.OrderUID).Scan(&ResultItems)
 		if err != nil {
 			fmt.Println(time.Now(), "Insert to Items failed:", err)
 		}
+		fmt.Println(time.Now(), "item =", ResultItems)
 	}
+
 }
 
 // OrderHandler - обработчик http-запросов
@@ -444,7 +438,7 @@ func (a *All) OrderHandler(Writer http.ResponseWriter, Request *http.Request) {
 
 // getHandler - обработчик GET-запроса
 func (a *All) getHandler(Writer http.ResponseWriter) error {
-	tmpl, err := template.ParseFiles("client/index.html")
+	tmpl, err := template.ParseFiles("index.html")
 	if err != nil {
 		return err
 	}
